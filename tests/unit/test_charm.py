@@ -2,13 +2,23 @@
 # See LICENSE file for licensing details.
 """State-transition tests for the LiteLLM charm."""
 
+import dataclasses
+
 import pytest
-from ops import ActiveStatus, BlockedStatus, WaitingStatus, pebble, testing
+from ops import ActiveStatus, BlockedStatus, MaintenanceStatus, WaitingStatus, pebble, testing
 
 import charm as charm_module
 import workload
 from charm import LiteLLMCharm
-from defaults import CONFIG_PATH, CONTAINER, PORT, READY_CHECK, SERVICE
+from defaults import (
+    ALIVE_CHECK,
+    CONFIG_PATH,
+    CONTAINER,
+    DRAIN_CHECK,
+    PORT,
+    READY_CHECK,
+    SERVICE,
+)
 
 MODELS = "[{name: local, model: openai/qwen, api-base: 'http://10.0.0.1:8888/v1'}]"
 SECRET_CONTENT = {"master-key": "sk-master", "openai": "sk-upstream"}
@@ -43,7 +53,11 @@ def _running(check_status=pebble.CheckStatus.UP):
         layers={CONTAINER: pebble.Layer(layer)},
         service_statuses={SERVICE: pebble.ServiceStatus.ACTIVE},
         check_infos={
-            testing.CheckInfo(READY_CHECK, level=pebble.CheckLevel.READY, status=check_status)
+            testing.CheckInfo(
+                READY_CHECK, level=pebble.CheckLevel.READY, status=check_status, threshold=2
+            ),
+            testing.CheckInfo(DRAIN_CHECK, level=pebble.CheckLevel.READY, threshold=1),
+            testing.CheckInfo(ALIVE_CHECK, level=pebble.CheckLevel.ALIVE, threshold=6),
         },
     )
 
@@ -328,3 +342,106 @@ def test_changed_encryption_key_blocks(ctx):
     assert out.unit_status == BlockedStatus(
         "encryption-key changed: restore the key the database uses"
     )
+
+
+@pytest.fixture
+def store(monkeypatch):
+    """Stand in for the valkey relation's data."""
+    from litellm_config import StoreSettings
+
+    settings = StoreSettings(host="valkey-primary", port=6379, username="u", password="pw")
+    monkeypatch.setattr(LiteLLMCharm, "_store_settings", lambda self: settings)
+    return settings
+
+
+def test_several_units_need_the_store(ctx):
+    """FR-028: more than one unit without a store blocks and serves nothing."""
+    out = ctx.run(ctx.on.config_changed(), _state(_running(), planned_units=3))
+    assert out.unit_status == BlockedStatus(
+        "more than one unit needs a Redis-compatible store: relate valkey"
+    )
+    assert out.get_container(CONTAINER).service_statuses[SERVICE] == pebble.ServiceStatus.INACTIVE
+
+
+def test_one_unit_needs_no_store(ctx):
+    """FR-028: a single unit runs without a store."""
+    out = ctx.run(ctx.on.config_changed(), _state(_container(), planned_units=1))
+    assert SERVICE in out.get_container(CONTAINER).plan.services
+
+
+def test_store_reaches_the_workload(ctx, store):
+    """FR-026: units share state through the store."""
+    out = ctx.run(ctx.on.config_changed(), _state(_container(), planned_units=3))
+    env = out.get_container(CONTAINER).plan.services[SERVICE].environment
+    assert env["REDIS_HOST"] == "valkey-primary"
+    assert env["REDIS_PASSWORD"] == "pw"
+
+
+def test_serving_units_take_turns(ctx, store, monkeypatch):
+    """SC-009: with other units serving, a change waits for the restart lock."""
+    requested = []
+    monkeypatch.setattr(
+        charm_module.RollingOpsManager,
+        "request_async_lock",
+        lambda self, callback_id, **kw: requested.append(callback_id),
+    )
+    out = ctx.run(
+        ctx.on.config_changed(),
+        _state(_running(), planned_units=3, relations={testing.PeerRelation("restart")}),
+    )
+    assert requested == ["restart"]
+    planned = out.get_container(CONTAINER).plan.services[SERVICE].environment
+    assert planned.get("LITELLM_CHARM_CONFIG_DIGEST") == "digest"
+    assert out.unit_status == MaintenanceStatus("waiting to restart with the new configuration")
+
+
+def test_unreachable_store_is_reported(ctx, store, monkeypatch):
+    """FR-029: the units keep serving and say the store is unreachable."""
+
+    def unreachable(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(charm_module.socket, "create_connection", unreachable)
+    first = ctx.run(ctx.on.config_changed(), _state(_container(), planned_units=1))
+    container = first.get_container(CONTAINER)
+    container = dataclasses.replace(
+        container,
+        service_statuses={SERVICE: pebble.ServiceStatus.ACTIVE},
+        check_infos=_running().check_infos,
+    )
+    out = ctx.run(ctx.on.update_status(), dataclasses.replace(first, containers={container}))
+    assert out.unit_status == ActiveStatus("shared state store unreachable, limits apply per unit")
+
+
+def test_leaving_unit_keeps_serving(ctx, store):
+    """SC-009: a unit being removed ignores its relations going away."""
+    database = _database()
+    peers = _peers({"database-used": "true"})
+    state = _state(
+        _running(), planned_units=1, secret=_secret(DB_SECRET), relations={database, peers}
+    )
+    # In the peer relation, unit 0 departing is this unit.
+    departed = ctx.run(ctx.on.relation_departed(peers, remote_unit=0, departing_unit=0), state)
+    out = ctx.run(ctx.on.relation_broken(database), departed)
+    assert out.get_container(CONTAINER).service_statuses[SERVICE] == pebble.ServiceStatus.ACTIVE
+    assert out.unit_status == MaintenanceStatus("leaving, serving until the pod stops")
+
+
+def test_another_unit_leaving_reconciles(ctx, store):
+    """Another unit leaving the peer relation is an ordinary change."""
+    peers = testing.PeerRelation("litellm-peers", peers_data={1: {}})
+    out = ctx.run(
+        ctx.on.relation_departed(peers, remote_unit=1, departing_unit=1),
+        _state(_container(), planned_units=1, relations={peers}),
+    )
+    assert SERVICE in out.get_container(CONTAINER).plan.services
+
+
+def test_start_waits_for_litellm(ctx, monkeypatch):
+    """Start finishes only once LiteLLM is ready, even when nothing changed."""
+    waited = []
+    monkeypatch.setattr(charm_module, "_wait_ready", lambda timeout: waited.append(timeout))
+    first = ctx.run(ctx.on.pebble_ready(_container()), _state(_container()))
+    waited.clear()
+    ctx.run(ctx.on.start(), first)
+    assert waited

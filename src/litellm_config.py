@@ -72,6 +72,16 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class StoreSettings:
+    """The shared state store from the valkey relation (FR-026)."""
+
+    host: str
+    port: int
+    username: str
+    password: str
+
+
+@dataclass(frozen=True)
 class Inputs:
     """Everything the rendered configuration depends on."""
 
@@ -88,6 +98,8 @@ class Inputs:
     extra_env: str = ""
     # From the database relation (FR-016). Empty without one (FR-017).
     database_url: str = ""
+    # From the valkey relation. None without one.
+    store: StoreSettings | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +133,15 @@ def database_url(username: str, password: str, endpoints: str, database: str) ->
     user = urllib.parse.quote(username, safe="")
     secret = urllib.parse.quote(password, safe="")
     return f"postgresql://{user}:{secret}@{host}/{database}"
+
+
+def parse_endpoint(endpoint: str) -> tuple[str, int]:
+    """``host:port`` of the first endpoint in a comma-separated list."""
+    first = endpoint.split(",")[0].strip()
+    host, sep, port = first.rpartition(":")
+    if not sep or not host or not port.isdigit():
+        raise ConfigError(f"the valkey relation gave an invalid endpoint {first!r}")
+    return host, int(port)
 
 
 def credential_variable(key: str) -> str:
@@ -182,6 +203,15 @@ def render(inputs: Inputs) -> Rendered:
             "master_key": "os.environ/LITELLM_MASTER_KEY",
         },
     }
+    if inputs.store is not None:
+        # Shared by every unit: rate limits, spend counters and locks, and the
+        # router's usage and cooldowns, which LiteLLM attaches to it (FR-026).
+        config["general_settings"]["coordination_redis"] = {
+            "host": "os.environ/REDIS_HOST",
+            "port": "os.environ/REDIS_PORT",
+            "username": "os.environ/REDIS_USERNAME",
+            "password": "os.environ/REDIS_PASSWORD",
+        }
     if not config["router_settings"]:
         del config["router_settings"]
 
@@ -197,6 +227,16 @@ def render(inputs: Inputs) -> Rendered:
         **_cost_map_environment(inputs.model_cost_map_url),
         **inputs.proxy,
     }
+    if inputs.store is not None:
+        # Also what a response cache enabled through litellm-settings uses.
+        environment.update(
+            {
+                "REDIS_HOST": inputs.store.host,
+                "REDIS_PORT": str(inputs.store.port),
+                "REDIS_USERNAME": inputs.store.username,
+                "REDIS_PASSWORD": inputs.store.password,
+            }
+        )
     if inputs.database_url:
         environment["DATABASE_URL"] = inputs.database_url
         environment["LITELLM_SALT_KEY"] = secret[ENCRYPTION_KEY]
