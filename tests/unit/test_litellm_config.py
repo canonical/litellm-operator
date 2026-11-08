@@ -308,3 +308,31 @@ def test_database_url_quotes_credentials():
         database_url("u", "a:b@c", "h1:5432,h2:5432", "litellm")
         == "postgresql://u:a%3Ab%40c@h1:5432/litellm"
     )
+
+
+def test_store_settings_are_shared():
+    """FR-026: the store is LiteLLM's coordination store, without values in the file."""
+    from litellm_config import StoreSettings
+
+    store = StoreSettings(host="valkey-primary.m.svc", port=6379, username="u", password="pw")
+    rendered = render(models=MODEL, store=store)
+    assert rendered.config["general_settings"]["coordination_redis"] == {
+        "host": "os.environ/REDIS_HOST",
+        "port": "os.environ/REDIS_PORT",
+        "username": "os.environ/REDIS_USERNAME",
+        "password": "os.environ/REDIS_PASSWORD",
+    }
+    assert rendered.environment["REDIS_HOST"] == "valkey-primary.m.svc"
+    assert rendered.environment["REDIS_PORT"] == "6379"
+    assert "pw" not in rendered.config_yaml
+
+
+def test_parse_endpoint():
+    from litellm_config import parse_endpoint
+
+    assert parse_endpoint("valkey-primary.m.svc.cluster.local:6379") == (
+        "valkey-primary.m.svc.cluster.local",
+        6379,
+    )
+    with pytest.raises(ConfigError, match="invalid endpoint"):
+        parse_endpoint("no-port")
