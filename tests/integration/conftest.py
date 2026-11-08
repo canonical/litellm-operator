@@ -156,11 +156,15 @@ def upstream(juju: jubilant.Juju, charm: Path, resources: dict[str, str]) -> Ups
             "litellm_params": {"model": "openai/mock", "mock_response": MOCK_ANSWER},
         }
     ]
+    # On the multi-node cluster the stand-in stays on the VM the tests run on,
+    # which the node-loss test never cuts off.
+    pin = {"tags": f"kubernetes.io/hostname={os.uname().nodename}"}
     juju.deploy(
         charm,
         UPSTREAM_APP,
         resources=resources,
         config={"credentials-secret": secret, "model-list": yaml.safe_dump(model_list)},
+        constraints=pin if os.environ.get("MULTINODE") == "1" else None,
     )
     juju.grant_secret(secret, UPSTREAM_APP)
     juju.wait(lambda status: jubilant.all_active(status, UPSTREAM_APP))
