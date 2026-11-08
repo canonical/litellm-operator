@@ -58,7 +58,9 @@ def test_serves_configured_model(juju: jubilant.Juju, deployed, upstream: Upstre
     assert time.monotonic() - deployed["started"] < 5 * 60, "SC-007: active within 5 minutes"
 
     address = service_address(juju, APP)
-    assert "chat" in model_names(address, MASTER_KEY)
+    # Juju's start gate can hold a new pod out of the Service for a few seconds
+    # after the unit is active (architecture.md, Workload).
+    wait_for(lambda: "chat" in model_names(address, MASTER_KEY), timeout=60, what="model list")
     text = answer(chat(address, "chat", MASTER_KEY))
     assert text
     if upstream.stand_in:

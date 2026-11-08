@@ -68,10 +68,19 @@ requires:
     interface: ingress
     limit: 1
     optional: true
+  valkey:
+    # Shares rate limits, budgets, routing state and cooldowns between units.
+    # Required with more than one unit.
+    interface: valkey_client
+    limit: 1
+    optional: true
 
 peers:
   litellm-peers:
     interface: litellm_peers
+  restart:
+    # Owned by charmlibs-rollingops: restarts one unit at a time.
+    interface: rollingops-peers
 
 actions:
   continue-without-database:
