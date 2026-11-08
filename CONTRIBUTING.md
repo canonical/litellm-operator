@@ -53,6 +53,26 @@ lxc delete --force litellm-it   # when done
 
 Environment variables: `CHARM_PATH` (packed charm), `LITELLM_IMAGE` (OCI image override), `KEEP_MODELS=1` (keep models for debugging). [`.kb/testing.md`](.kb/testing.md) has the details.
 
+To test against a model server running on the host, give its address on the LXD bridge and a model it serves. Without these, the tests deploy a stand-in upstream:
+
+```bash
+lxc exec litellm-it --cwd /root/litellm-operator -- env \
+  JUJU_CONTROLLER=concierge-microk8s \
+  LITELLM_TEST_UPSTREAM_URL=http://$(lxc network get lxdbr0 ipv4.address | cut -d/ -f1):<port>/v1 \
+  LITELLM_TEST_UPSTREAM_MODEL=<model> \
+  uv run --group integration pytest tests/integration -v -x
+```
+
+The node-loss tests need 3 nodes. Build a cluster of 3 LXD VMs and run them from the first VM:
+
+```bash
+tests/integration/multinode/setup.sh   # prints the VM and controller names
+lxc file push -r . litellm-mn-0/root/litellm-operator   # with the packed charm
+lxc exec litellm-mn-0 --cwd /root/litellm-operator -- env \
+  JUJU_CONTROLLER=litellm-mn MULTINODE=1 \
+  uv run --group integration pytest tests/integration/test_node_loss.py -v
+```
+
 ## Publishing
 
 CI does this. Pull requests lint, unit test, build and run the integration tests on native amd64 and arm64 runners. Pushes to `main` then also upload both charms and the image named by `upstream-source`, release them to `latest/edge`, and run `test_published.py` against that release on both architectures. Until the repository has a `charmcraft.yaml`, only lint and unit tests run.
