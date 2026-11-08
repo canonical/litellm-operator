@@ -208,3 +208,123 @@ def test_conflicts_are_logged(ctx, caplog):
         _state(_container(), config={"router-settings": "{routing_strategy: least-busy}"}),
     )
     assert "overrides router_settings.routing_strategy" in caplog.text
+
+
+DB_DATA = {
+    "username": "relation-7",
+    "password": "p@ss/word",
+    "endpoints": "postgresql-k8s-primary.m.svc.cluster.local:5432",
+    "database": "litellm",
+}
+DB_SECRET = {**SECRET_CONTENT, "encryption-key": "salt-1"}
+
+
+def _database(data=None):
+    return testing.Relation("database", remote_app_data=data if data is not None else DB_DATA)
+
+
+def _peers(data=None):
+    return testing.PeerRelation("litellm-peers", local_app_data=data or {})
+
+
+def test_database_url_reaches_the_workload(ctx):
+    """FR-016, FR-021: the relation's URL and the encryption key are passed on."""
+    secret = _secret(DB_SECRET)
+    out = ctx.run(
+        ctx.on.config_changed(),
+        _state(_container(), secret=secret, relations={_database(), _peers()}),
+    )
+    env = out.get_container(CONTAINER).plan.services[SERVICE].environment
+    assert env["DATABASE_URL"] == (
+        "postgresql://relation-7:p%40ss%2Fword@"
+        "postgresql-k8s-primary.m.svc.cluster.local:5432/litellm"
+    )
+    assert env["LITELLM_SALT_KEY"] == "salt-1"
+    assert env["STORE_MODEL_IN_DB"] == "False"
+    peers = next(r for r in out.relations if r.endpoint == "litellm-peers")
+    assert peers.local_app_data["database-used"] == "true"
+    assert peers.local_app_data["encryption-key-digest"]
+
+
+def test_master_key_only_without_database(ctx):
+    """FR-017: no relation, no database settings."""
+    out = ctx.run(ctx.on.config_changed(), _state(_container(), relations={_peers()}))
+    env = out.get_container(CONTAINER).plan.services[SERVICE].environment
+    assert "DATABASE_URL" not in env and "LITELLM_SALT_KEY" not in env
+
+
+def test_waits_for_database_credentials(ctx):
+    out = ctx.run(
+        ctx.on.config_changed(),
+        _state(_container(), secret=_secret(DB_SECRET), relations={_database({})}),
+    )
+    assert out.unit_status == WaitingStatus("waiting for the database relation")
+
+
+def test_database_needs_an_encryption_key(ctx):
+    out = ctx.run(ctx.on.config_changed(), _state(_container(), relations={_database(), _peers()}))
+    assert out.unit_status == BlockedStatus(
+        "credentials-secret needs encryption-key with a database"
+    )
+
+
+def test_blocks_after_losing_the_database(ctx):
+    """FR-018: a deployment that used the database never drops it silently."""
+    out = ctx.run(
+        ctx.on.config_changed(),
+        _state(_running(), relations={_peers({"database-used": "true"})}),
+    )
+    assert out.unit_status == BlockedStatus(
+        "database relation removed: relate postgresql again, or run continue-without-database"
+    )
+    assert out.get_container(CONTAINER).service_statuses[SERVICE] == pebble.ServiceStatus.INACTIVE
+
+
+def test_relation_broken_blocks(ctx):
+    """FR-018: the broken hook already treats the relation as gone."""
+    database = _database()
+    state = _state(
+        _running(),
+        secret=_secret(DB_SECRET),
+        relations={database, _peers({"database-used": "true"})},
+    )
+    out = ctx.run(ctx.on.relation_broken(database), state)
+    assert isinstance(out.unit_status, BlockedStatus)
+
+
+def test_continue_without_database(ctx):
+    """FR-018: the action clears the flags so the unit serves with the master key."""
+    peers = _peers({"database-used": "true", "encryption-key-digest": "abc"})
+    out = ctx.run(
+        ctx.on.action("continue-without-database"), _state(_container(), relations={peers})
+    )
+    assert ctx.action_results == {"result": "serving with the master key only"}
+    peers_out = next(r for r in out.relations if r.endpoint == "litellm-peers")
+    assert "database-used" not in peers_out.local_app_data
+    assert SERVICE in out.get_container(CONTAINER).plan.services
+
+
+def test_continue_without_database_refused_while_related(ctx):
+    with pytest.raises(testing.ActionFailed, match="still exists"):
+        ctx.run(
+            ctx.on.action("continue-without-database"),
+            _state(
+                _container(),
+                secret=_secret(DB_SECRET),
+                relations={_database(), _peers({"database-used": "true"})},
+            ),
+        )
+
+
+def test_changed_encryption_key_blocks(ctx):
+    """FR-021: a different key than the one the database was written with blocks."""
+    from litellm_config import key_digest
+
+    peers = _peers({"database-used": "true", "encryption-key-digest": key_digest("salt-0")})
+    out = ctx.run(
+        ctx.on.config_changed(),
+        _state(_running(), secret=_secret(DB_SECRET), relations={_database(), peers}),
+    )
+    assert out.unit_status == BlockedStatus(
+        "encryption-key changed: restore the key the database uses"
+    )

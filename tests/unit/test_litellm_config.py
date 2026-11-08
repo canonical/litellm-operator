@@ -299,3 +299,12 @@ def test_charm_owned_settings_are_refused(kwargs, message):
     """FR-022: the passthrough cannot set what the charm manages."""
     with pytest.raises(ConfigError, match=message):
         render(models=MODEL, **kwargs)
+
+
+def test_database_url_quotes_credentials():
+    from litellm_config import database_url
+
+    assert (
+        database_url("u", "a:b@c", "h1:5432,h2:5432", "litellm")
+        == "postgresql://u:a%3Ab%40c@h1:5432/litellm"
+    )
