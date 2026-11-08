@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 
 import ops
+from charms.data_platform_libs.v0.data_interfaces import DatabaseRequires
 from charms.traefik_k8s.v2.ingress import IngressPerAppRequirer
 
 import litellm_config
@@ -34,8 +35,14 @@ from defaults import (
     CONTAINER,
     COST_MAP_SOURCE_PATH,
     CREDENTIALS_OPTION,
+    DATABASE_NAME,
+    DATABASE_RELATION,
+    DATABASE_USED,
+    ENCRYPTION_KEY,
     INGRESS_RELATION,
+    KEY_DIGEST,
     MASTER_KEY,
+    PEER_RELATION,
     PORT,
     READINESS_PATH,
     READY_CHECK,
@@ -78,14 +85,28 @@ class LiteLLMCharm(ops.CharmBase):
         self.container = self.unit.get_container(CONTAINER)
         self._stored.set_default(cost_map_fallback="")
         self.ingress = IngressPerAppRequirer(self, relation_name=INGRESS_RELATION, port=PORT)
+        self.database = DatabaseRequires(
+            self, relation_name=DATABASE_RELATION, database_name=DATABASE_NAME
+        )
+        # Set while the database relation is being removed: in its
+        # relation-broken hook the relation is still listed.
+        self._database_broken = False
 
         for event in (
             self.on[CONTAINER].pebble_ready,
             self.on.config_changed,
             self.on.upgrade_charm,
             self.on.secret_changed,
+            self.on.leader_elected,
+            self.on[PEER_RELATION].relation_changed,
+            self.database.on.database_created,
+            self.database.on.endpoints_changed,
         ):
             framework.observe(event, self._reconcile)
+        framework.observe(self.on[DATABASE_RELATION].relation_broken, self._on_database_broken)
+        framework.observe(
+            self.on.continue_without_database_action, self._on_continue_without_database
+        )
         framework.observe(self.on[CONTAINER].pebble_check_failed, self._on_check_event)
         framework.observe(self.on[CONTAINER].pebble_check_recovered, self._on_check_event)
         framework.observe(self.on.update_status, self._on_update_status)
@@ -104,6 +125,27 @@ class LiteLLMCharm(ops.CharmBase):
         service = self.container.get_plan().services[SERVICE]
         self._check_cost_map(service.environment.get("LITELLM_MASTER_KEY", ""))
 
+    def _on_database_broken(self, event: ops.RelationBrokenEvent) -> None:
+        self._database_broken = True
+        self._reconcile(event)
+
+    def _on_continue_without_database(self, event: ops.ActionEvent) -> None:
+        """Serve with the master key only after the database was removed (FR-018)."""
+        if not self.unit.is_leader():
+            event.fail("run this action on the leader unit")
+            return
+        if self.model.relations[DATABASE_RELATION]:
+            event.fail("the database relation still exists: remove it first")
+            return
+        peers = self._peer_data()
+        if peers is None:
+            event.fail("the peer relation is not ready yet")
+            return
+        peers.pop(DATABASE_USED, None)
+        peers.pop(KEY_DIGEST, None)
+        self._reconcile(event)
+        event.set_results({"result": "serving with the master key only"})
+
     # ------------------------------------------------------------------
     # Reconciliation
     # ------------------------------------------------------------------
@@ -117,6 +159,8 @@ class LiteLLMCharm(ops.CharmBase):
             logger.info("Not running LiteLLM: %s", exc.status.message)
             self._stop()
             return
+        if "DATABASE_URL" in rendered.environment:
+            self._record_database_use(rendered.environment["LITELLM_SALT_KEY"])
         if self._serving() and self._planned_digest() == rendered.digest:
             return
 
@@ -140,11 +184,28 @@ class LiteLLMCharm(ops.CharmBase):
 
     def _desired_state(self) -> litellm_config.Rendered:
         """Derive the workload's configuration, or raise :class:`StatusError`."""
+        secret = self._credentials()
+        database_url = self._database_url()
+        peers = self._peer_data() or {}
+        if not database_url and peers.get(DATABASE_USED):
+            raise StatusError(
+                ops.BlockedStatus(
+                    "database relation removed: relate postgresql again, "
+                    "or run continue-without-database"
+                )
+            )
+        digest = peers.get(KEY_DIGEST)
+        key = secret.get(ENCRYPTION_KEY, "")
+        if database_url and digest and key and litellm_config.key_digest(key) != digest:
+            raise StatusError(
+                ops.BlockedStatus(f"{ENCRYPTION_KEY} changed: restore the key the database uses")
+            )
         inputs = litellm_config.Inputs(
             models=str(self.config.get("models", "")),
             model_list=str(self.config.get("model-list", "")),
             model_cost_map_url=str(self.config.get("model-cost-map-url", "")),
-            secret=self._credentials(),
+            secret=secret,
+            database_url=database_url,
             proxy=litellm_config.proxy_environment(os.environ),
             options={name: self.config.get(name) for name in NAMED_OPTIONS},
             litellm_settings=str(self.config.get("litellm-settings", "")),
@@ -160,6 +221,38 @@ class LiteLLMCharm(ops.CharmBase):
             return rendered
         except litellm_config.ConfigError as exc:
             raise StatusError(ops.BlockedStatus(str(exc))) from exc
+
+    def _database_url(self) -> str:
+        """The URL from the database relation, or empty without one (FR-016, FR-017)."""
+        relations = self.model.relations[DATABASE_RELATION]
+        if not relations or self._database_broken:
+            return ""
+        relation = relations[0]
+        data = self.database.fetch_relation_data([relation.id]).get(relation.id, {})
+        username, password, endpoints = (
+            data.get("username"),
+            data.get("password"),
+            data.get("endpoints"),
+        )
+        if not (username and password and endpoints):
+            raise StatusError(ops.WaitingStatus("waiting for the database relation"))
+        return litellm_config.database_url(
+            username, password, endpoints, data.get("database") or DATABASE_NAME
+        )
+
+    def _peer_data(self) -> ops.RelationDataContent | None:
+        relation = self.model.get_relation(PEER_RELATION)
+        return None if relation is None else relation.data[self.app]
+
+    def _record_database_use(self, key: str) -> None:
+        """Remember that the database holds data, and under which key (FR-018, FR-021)."""
+        peers = self._peer_data()
+        if peers is None or not self.unit.is_leader():
+            return
+        if not peers.get(DATABASE_USED):
+            peers[DATABASE_USED] = "true"
+        if not peers.get(KEY_DIGEST):
+            peers[KEY_DIGEST] = litellm_config.key_digest(key)
 
     def _credentials(self) -> dict[str, str]:
         """Content of the secret named by credentials-secret (FR-005)."""

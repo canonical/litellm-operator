@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -85,6 +86,8 @@ class Inputs:
     litellm_settings: str = ""
     router_settings: str = ""
     extra_env: str = ""
+    # From the database relation (FR-016). Empty without one (FR-017).
+    database_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,19 @@ class Rendered:
         """Changes whenever the file or the environment changes."""
         material = self.config_yaml + "\0" + repr(sorted(self.environment.items()))
         return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+def key_digest(key: str) -> str:
+    """A digest of the encryption key, to notice a change without storing the key."""
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def database_url(username: str, password: str, endpoints: str, database: str) -> str:
+    """A PostgreSQL URL for LiteLLM from relation data. The first endpoint is the primary."""
+    host = endpoints.split(",")[0].strip()
+    user = urllib.parse.quote(username, safe="")
+    secret = urllib.parse.quote(password, safe="")
+    return f"postgresql://{user}:{secret}@{host}/{database}"
 
 
 def credential_variable(key: str) -> str:
@@ -132,6 +148,8 @@ def render(inputs: Inputs) -> Rendered:
     """Render the configuration, or raise :class:`ConfigError` naming the problem."""
     secret = dict(inputs.secret)
     _check_secret(secret)
+    if inputs.database_url and not secret.get(ENCRYPTION_KEY):
+        raise ConfigError(f"credentials-secret needs {ENCRYPTION_KEY} with a database")
     model_list = [_structured_entry(entry, i, secret) for i, entry in _entries(inputs)]
     model_list += [_raw_entry(entry, i, secret) for i, entry in _raw_entries(inputs)]
 
@@ -179,6 +197,9 @@ def render(inputs: Inputs) -> Rendered:
         **_cost_map_environment(inputs.model_cost_map_url),
         **inputs.proxy,
     }
+    if inputs.database_url:
+        environment["DATABASE_URL"] = inputs.database_url
+        environment["LITELLM_SALT_KEY"] = secret[ENCRYPTION_KEY]
     for key, value in secret.items():
         if key not in (MASTER_KEY, ENCRYPTION_KEY):
             environment[credential_variable(key)] = value

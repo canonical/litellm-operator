@@ -24,8 +24,14 @@ LIVENESS_PATH = "/health/liveliness"
 COST_MAP_SOURCE_PATH = "/model/cost_map/source"
 
 INGRESS_RELATION = "ingress"
+DATABASE_RELATION = "database"
+DATABASE_NAME = "litellm"
 PEER_RELATION = "litellm-peers"
 
 CREDENTIALS_OPTION = "credentials-secret"
 MASTER_KEY = "master-key"
 ENCRYPTION_KEY = "encryption-key"
+
+# Peer application data, written by the leader (architecture.md, Relations).
+DATABASE_USED = "database-used"
+KEY_DIGEST = "encryption-key-digest"
