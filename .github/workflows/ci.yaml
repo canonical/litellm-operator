@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      charmhub-branch:
+        description: >
+          Publish this ref to the Charmhub branch latest/edge/<name>, e.g.
+          pr-9, to try it before merging. Lowercase letters, digits and dashes.
+          Leave empty to publish only from main, to latest/edge.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  lint-unit:
+    runs-on: ubuntu-26.04
+    outputs:
+      charm: ${{ steps.charm.outputs.charm }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo snap install astral-uv --classic
+      - run: uvx --with tox-uv tox -e lint,unit
+      # The charm jobs below run once the repository has a charmcraft.yaml.
+      # Until then they are skipped, so pull requests that only change the
+      # tooling or documentation still pass. See .kb/releases.md.
+      - name: Check for a charm
+        id: charm
+        run: |
+          if [ -f charmcraft.yaml ]; then echo "charm=true"; else echo "charm=false"; fi >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: lint-unit
+    if: needs.lint-unit.outputs.charm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: canonical/setup-lxd@8c6a87bfb56aa48f3fb9b830baa18562d8bfd4ee # v1
+      - run: sudo snap install charmcraft --classic --channel 4.x/stable
+      - run: charmcraft pack -v
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: charm-${{ matrix.arch }}
+          path: "*_${{ matrix.arch }}.charm"
+          if-no-files-found: error
+          retention-days: 7
+
+  integration:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: charm-${{ matrix.arch }}
+      - uses: ./.github/actions/setup-k8s
+      - name: Test the packed charm
+        env:
+          JUJU_CONTROLLER: concierge-microk8s
+        run: |
+          set -euo pipefail
+          CHARM_PATH=$(ls ./*_${{ matrix.arch }}.charm)
+          export CHARM_PATH
+          uv run --group integration pytest tests/integration --ignore=tests/integration/test_published.py -v -x --tb=short
+
+  publish:
+    needs: [lint-unit, integration]
+    # main publishes to latest/edge. Any ref can publish to a Charmhub branch
+    # on request. Pull requests never publish, so forks can't reach the token.
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || inputs.charmhub-branch != '')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    concurrency:
+      group: publish
+    outputs:
+      channel: ${{ steps.channel.outputs.channel }}
+      amd64-revision: ${{ steps.publish.outputs.amd64-revision }}
+      arm64-revision: ${{ steps.publish.outputs.arm64-revision }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: charms
+          pattern: charm-*
+          merge-multiple: true
+      - run: sudo snap install charmcraft --classic --channel 4.x/stable
+      - name: Choose the channel
+        id: channel
+        env:
+          BRANCH: ${{ inputs.charmhub-branch }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BRANCH" ]; then
+            channel=latest/edge
+          elif [[ "$BRANCH" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+            channel="latest/edge/$BRANCH"
+          else
+            echo "::error::charmhub-branch must be lowercase letters, digits and dashes" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "Publishing to $channel" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the charms and image, and release them
+        id: publish
+        env:
+          CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+        run: |
+          set -euo pipefail
+          # The charm name, the image resource and the image come from
+          # charmcraft.yaml. The resource is named <charm>-image.
+          name=$(sed -n 's/^name: *//p' charmcraft.yaml)
+          image=$(sed -n 's/^ *upstream-source: *//p' charmcraft.yaml)
+          # Charmhub only accepts a resource declared by an uploaded revision,
+          # so the charms go first. The image is multi-arch: one resource
+          # revision serves both.
+          # Re-running this job uploads the same files again. Charmhub refuses a
+          # duplicate but names the revision it already has, so use that one.
+          upload() {
+            local out err existing
+            err=$(mktemp)
+            if out=$(charmcraft upload "$1" --format json 2>"$err"); then
+              jq -er .revision <<<"$out"
+            elif existing=$(grep -ohP 'Revision of the existing package is: \K[0-9]+' "$err" - <<<"$out") &&
+              existing=${existing%%$'\n'*} && [ -n "$existing" ]; then
+              # charmcraft may report it in both streams; take it once.
+              echo "$existing"
+              echo "$1 is already uploaded as revision $existing; reusing it" >&2
+            else
+              cat "$err" >&2; echo "$out" >&2; return 1
+            fi
+          }
+          for arch in amd64 arm64; do
+            revision=$(upload "charms/${name}_${arch}.charm")
+            echo "${arch}-revision=${revision}" >> "$GITHUB_OUTPUT"
+            declare "revision_${arch}=${revision}"
+          done
+          resource=$(charmcraft upload-resource "$name" "${name}-image" \
+            --image="docker://${image}" --format json | jq -er .revision)
+          for revision in "$revision_amd64" "$revision_arm64"; do
+            charmcraft release "$name" --revision="$revision" --channel="$CHANNEL" \
+              --resource="${name}-image:${resource}"
+          done
+          charmcraft status "$name"
+
+  verify-published:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-k8s
+      - name: Deploy the release from Charmhub
+        env:
+          JUJU_CONTROLLER: concierge-microk8s
+          CHARM_CHANNEL: ${{ needs.publish.outputs.channel }}
+          EXPECTED_CHARM_REVISION: ${{ needs.publish.outputs[format('{0}-revision', matrix.arch)] }}
+        run: uv run --group integration pytest tests/integration/test_published.py -v -x --tb=short

@@ -1,0 +1,36 @@
+[project]
+name = "litellm-k8s-charm"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "Kubernetes charm for the LiteLLM proxy"
+dependencies = []
+
+[dependency-groups]
+lint = [
+    "ruff",
+]
+unit = [
+    "pytest",
+]
+integration = [
+    "pytest",
+    "jubilant ~= 1.0",
+    "pyyaml",
+]
+
+[tool.ruff]
+line-length = 99
+target-version = "py312"
+extend-exclude = ["lib"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "adopt_requirements",
+    "check_requirements",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "lib", "scripts"]
