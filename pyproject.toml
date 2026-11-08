@@ -3,6 +3,8 @@ name = "litellm-k8s-charm"
 version = "0.1.0"
 requires-python = ">=3.12"
 description = "Kubernetes charm for the LiteLLM proxy"
+license = "Apache-2.0"
+authors = [{ name = "Canonical Ltd." }]
 dependencies = []
 
 [dependency-groups]

@@ -22,4 +22,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how features are defined, built and t
 
 ## License
 
-The LiteLLM Operator is free software, distributed under the Apache Software License, version 2.0. See [LICENSE](LICENSE) for more information. LiteLLM itself is MIT licensed by BerriAI, except its `enterprise/` directory.
+Copyright 2026 Canonical Ltd. The LiteLLM Operator is free software, distributed under the Apache Software License, version 2.0. See [LICENSE](LICENSE) for more information. LiteLLM itself is MIT licensed by BerriAI, except its `enterprise/` directory.

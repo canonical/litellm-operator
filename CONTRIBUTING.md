@@ -68,4 +68,5 @@ Publishing uses the `CHARMHUB_TOKEN` repository secret, created with `charmcraft
 ## Conventions
 
 - Runtime dependencies go in `pyproject.toml` and are locked in `uv.lock`. Run `uv lock` after changing them.
+- Start every new source file with `# Copyright <year> Canonical Ltd.` and `# See LICENSE file for licensing details.`
 - Do not commit built `*.charm` files.

@@ -66,6 +66,15 @@ The human author owns every change. No commit trailer, pull request footer, head
 
 A section with nothing to say yet is omitted until a feature fills it. The base pull request of a feature updates `README.md` for the whole feature (spec-kit.md§2). Build and test instructions belong in `CONTRIBUTING.md`, and the agent's guide in `.kb/`.
 
+## Copyright
+
+Canonical Ltd. holds the copyright. Every new source file starts with this header, using the year the file was created:
+
+```python
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+```
+
 ## Backticks
 
 Put identifiers, commands, paths, config options, environment variables and values in backticks when the exact spelling matters.
