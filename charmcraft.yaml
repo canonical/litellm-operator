@@ -44,6 +44,8 @@ parts:
       - astral-uv
 
 charm-libs:
+  - lib: data_platform_libs.data_interfaces
+    version: "0"
   - lib: traefik_k8s.ingress
     version: "2"
 
@@ -58,10 +60,25 @@ resources:
     upstream-source: ghcr.io/berriai/litellm-non_root:v1.108.3
 
 requires:
+  database:
+    interface: postgresql_client
+    limit: 1
+    optional: true
   ingress:
     interface: ingress
     limit: 1
     optional: true
+
+peers:
+  litellm-peers:
+    interface: litellm_peers
+
+actions:
+  continue-without-database:
+    description: >
+      Serve with the master key only after the database relation was
+      removed. Virtual keys, teams and budgets stored in that database stop
+      working. Run it on the leader, and only after removing the relation.
 
 config:
   options:
@@ -69,7 +86,9 @@ config:
       type: secret
       description: >
         A Juju user secret holding `master-key`, the key clients call the
-        proxy with, which must start with `sk-`, and any upstream API keys
+        proxy with, which must start with `sk-`; `encryption-key`, which
+        encrypts credentials stored in the database, needed with a database
+        relation and never to be changed afterwards; and any upstream API keys
         under names of your choice, such as `openai`. Model entries refer to
         upstream keys by name. Create it with
         `juju add-secret litellm-credentials master-key=sk-... openai=sk-...`,
