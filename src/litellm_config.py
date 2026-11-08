@@ -25,6 +25,36 @@ CREDENTIAL_PREFIX = "LITELLM_CREDENTIAL_"
 PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
 _SECRET_KEY = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
+ROUTING_STRATEGIES = (
+    "simple-shuffle",
+    "least-busy",
+    "usage-based-routing",
+    "latency-based-routing",
+    "cost-based-routing",
+    "usage-based-routing-v2",
+)
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+# Settings the charm manages, refused in the passthrough options (FR-022).
+OWNED_ROUTER_SETTINGS = frozenset({"redis_host", "redis_port", "redis_password", "redis_url"})
+OWNED_LITELLM_SETTINGS = frozenset({"cache_params"})
+OWNED_ENVIRONMENT = frozenset(
+    {
+        "LITELLM_MASTER_KEY",
+        "LITELLM_SALT_KEY",
+        "DATABASE_URL",
+        "STORE_MODEL_IN_DB",
+        "PORT",
+        "NUM_WORKERS",
+        "LITELLM_LOCAL_MODEL_COST_MAP",
+        "LITELLM_MODEL_COST_MAP_URL",
+        "DISABLE_ADMIN_UI",
+        "LITELLM_CHARM_CONFIG_DIGEST",
+    }
+)
+OWNED_ENVIRONMENT_PREFIXES = ("REDIS_", CREDENTIAL_PREFIX)
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 # Fields of a structured model entry (data-model.md) and where each one goes.
 _ENTRY_FIELDS = {
     "name",
@@ -49,6 +79,12 @@ class Inputs:
     model_cost_map_url: str = ""
     secret: Mapping[str, str] = field(default_factory=dict)
     proxy: Mapping[str, str] = field(default_factory=dict)
+    # Named options (FR-024), by option name. Missing or None means unset.
+    options: Mapping[str, Any] = field(default_factory=dict)
+    # Passthrough options (FR-025).
+    litellm_settings: str = ""
+    router_settings: str = ""
+    extra_env: str = ""
 
 
 @dataclass(frozen=True)
@@ -57,6 +93,8 @@ class Rendered:
 
     config: dict[str, Any]
     environment: dict[str, str]
+    # Passthrough settings a named option overrode, to be logged.
+    conflicts: tuple[str, ...] = ()
 
     @property
     def config_yaml(self) -> str:
@@ -97,32 +135,146 @@ def render(inputs: Inputs) -> Rendered:
     model_list = [_structured_entry(entry, i, secret) for i, entry in _entries(inputs)]
     model_list += [_raw_entry(entry, i, secret) for i, entry in _raw_entries(inputs)]
 
+    litellm_settings = _load_mapping(inputs.litellm_settings, "litellm-settings")
+    router_settings = _load_mapping(inputs.router_settings, "router-settings")
+    extra_env = _load_environment(inputs.extra_env)
+    _refuse_owned("litellm-settings", litellm_settings, OWNED_LITELLM_SETTINGS)
+    _refuse_owned("router-settings", router_settings, OWNED_ROUTER_SETTINGS)
+    for name in extra_env:
+        if name in OWNED_ENVIRONMENT or name.startswith(OWNED_ENVIRONMENT_PREFIXES):
+            raise ConfigError(f"extra-env must not set {name}, the charm manages it")
+
+    named = _named_settings(inputs.options)
+    conflicts: list[str] = []
+    for section, passthrough in (
+        ("litellm_settings", litellm_settings),
+        ("router_settings", router_settings),
+    ):
+        for key in sorted(set(passthrough) & set(named[section])):
+            conflicts.append(f"{section}.{key}")
+    if "LITELLM_LOG" in extra_env:
+        conflicts.append("LITELLM_LOG")
+
     config: dict[str, Any] = {
         "model_list": model_list,
-        "litellm_settings": {
-            # Prompts and completions stay out of logging callbacks (SC-012).
-            "turn_off_message_logging": True,
-        },
+        "litellm_settings": {**litellm_settings, **named["litellm_settings"]},
+        "router_settings": {**router_settings, **named["router_settings"]},
         "general_settings": {
+            **named["general_settings"],
             "master_key": "os.environ/LITELLM_MASTER_KEY",
         },
     }
+    if not config["router_settings"]:
+        del config["router_settings"]
 
     environment: dict[str, str] = {
+        **extra_env,
         "LITELLM_MASTER_KEY": secret[MASTER_KEY],
         # Models live in this file only, never in the database (FR-023).
         "STORE_MODEL_IN_DB": "False",
         # The admin UI is a separate feature.
         "DISABLE_ADMIN_UI": "True",
-        # LiteLLM's own default is DEBUG.
-        "LITELLM_LOG": "INFO",
+        # Always set: LiteLLM's own default is DEBUG.
+        "LITELLM_LOG": named["log_level"],
         **_cost_map_environment(inputs.model_cost_map_url),
         **inputs.proxy,
     }
     for key, value in secret.items():
         if key not in (MASTER_KEY, ENCRYPTION_KEY):
             environment[credential_variable(key)] = value
-    return Rendered(config=config, environment=environment)
+    return Rendered(config=config, environment=environment, conflicts=tuple(conflicts))
+
+
+def _named_settings(options: Mapping[str, Any]) -> dict[str, Any]:
+    """The settings the named options set (FR-024). Unset options set nothing."""
+    litellm: dict[str, Any] = {
+        # Prompts and completions stay out of logging callbacks unless asked (SC-012).
+        "turn_off_message_logging": not bool(options.get("log-request-content", False)),
+    }
+    router: dict[str, Any] = {}
+    general: dict[str, Any] = {}
+
+    strategy = options.get("routing-strategy") or "simple-shuffle"
+    if strategy not in ROUTING_STRATEGIES:
+        raise ConfigError(f"routing-strategy must be one of {', '.join(ROUTING_STRATEGIES)}")
+    router["routing_strategy"] = strategy
+    for option, key in (("num-retries", "num_retries"), ("request-timeout", "request_timeout")):
+        value = options.get(option)
+        if value is not None:
+            if int(value) < 0:
+                raise ConfigError(f"{option} must be 0 or more")
+            litellm[key] = int(value)
+    if options.get("drop-params"):
+        litellm["drop_params"] = True
+    fallbacks = _load_list(str(options.get("fallbacks") or ""), "fallbacks")
+    if fallbacks:
+        for item in fallbacks:
+            if not (isinstance(item, dict) and len(item) == 1):
+                raise ConfigError("fallbacks must be a list of {model: [fallback, ...]}")
+            targets = next(iter(item.values()))
+            if not isinstance(targets, list) or not all(isinstance(t, str) for t in targets):
+                raise ConfigError("fallbacks must be a list of {model: [fallback, ...]}")
+        router["fallbacks"] = fallbacks
+
+    size = int(options.get("max-request-size-mb") or 0)
+    if size < 0:
+        raise ConfigError("max-request-size-mb must be 0 or more")
+    if size:
+        general["max_request_size_mb"] = size
+    if options.get("serve-without-database"):
+        general["allow_requests_on_db_unavailable"] = True
+    if not options.get("spend-logs", True):
+        general["disable_spend_logs"] = True
+
+    log_level = str(options.get("log-level") or "INFO").upper()
+    if log_level not in LOG_LEVELS:
+        raise ConfigError(f"log-level must be one of {', '.join(LOG_LEVELS)}")
+    return {
+        "litellm_settings": litellm,
+        "router_settings": router,
+        "general_settings": general,
+        "log_level": log_level,
+    }
+
+
+def _load_mapping(text: str, option: str) -> dict[str, Any]:
+    return _load_yaml(text, option, dict)
+
+
+def _refuse_owned(option: str, settings: Mapping[str, Any], owned: frozenset[str]) -> None:
+    for key in sorted(settings):
+        if key in owned or key in _ALWAYS_OWNED:
+            raise ConfigError(f"{option} must not set {key}, the charm manages it")
+
+
+# Keys refused in every section: what FR-022 lists, by LiteLLM's names.
+_ALWAYS_OWNED = frozenset(
+    {
+        "master_key",
+        "database_url",
+        "salt_key",
+        "store_model_in_db",
+        "port",
+        "num_workers",
+        "coordination_redis",
+        "model_list",
+    }
+)
+
+
+def _load_environment(text: str) -> dict[str, str]:
+    """``KEY=VALUE`` lines. Blank lines and lines starting with # are skipped."""
+    result: dict[str, str] = {}
+    for number, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, sep, value = line.partition("=")
+        name = name.strip()
+        if not sep or not _ENV_NAME.match(name):
+            raise ConfigError(f"extra-env line {number} must be KEY=VALUE")
+        result[name] = value.strip()
+    return result
 
 
 def _check_secret(secret: Mapping[str, str]) -> None:
@@ -147,16 +299,21 @@ def _cost_map_environment(url: str) -> dict[str, str]:
 
 
 def _load_list(text: str, option: str) -> list[Any]:
+    return _load_yaml(text, option, list)
+
+
+def _load_yaml(text: str, option: str, kind: type) -> Any:
+    """An option's YAML value of type ``kind``. Empty text means an empty value."""
     if not text.strip():
-        return []
+        return kind()
     try:
         value = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise ConfigError(f"{option} is not valid YAML") from exc
     if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ConfigError(f"{option} must be a YAML list")
+        return kind()
+    if not isinstance(value, kind):
+        raise ConfigError(f"{option} must be a YAML {'list' if kind is list else 'mapping'}")
     return value
 
 

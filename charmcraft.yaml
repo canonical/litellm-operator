@@ -98,3 +98,69 @@ config:
         Address of a full price map in LiteLLM's format, loaded at startup
         instead of the map bundled in the image. If it cannot be loaded or is
         rejected, the bundled map is used and the unit status says so.
+    routing-strategy:
+      type: string
+      default: simple-shuffle
+      description: >
+        How requests are spread across entries with the same name: one of
+        simple-shuffle, least-busy, usage-based-routing, latency-based-routing,
+        cost-based-routing or usage-based-routing-v2.
+    num-retries:
+      type: int
+      description: Retries for a failed upstream request. Unset uses LiteLLM's default.
+    request-timeout:
+      type: int
+      description: Seconds before an upstream request fails. Unset uses LiteLLM's default.
+    fallbacks:
+      type: string
+      default: ""
+      description: >
+        Models to try when a model fails, as a YAML list of
+        `{model: [fallback, ...]}`, for example `[{gpt-4o: [local]}]`.
+    log-level:
+      type: string
+      default: INFO
+      description: Workload log level, one of DEBUG, INFO, WARNING, ERROR or CRITICAL.
+    log-request-content:
+      type: boolean
+      default: false
+      description: >
+        Allow prompts and completions to be logged. Off by default, which
+        redacts them from LiteLLM's logging.
+    drop-params:
+      type: boolean
+      default: false
+      description: Drop request parameters an upstream does not support instead of failing.
+    max-request-size-mb:
+      type: int
+      default: 0
+      description: Largest request body accepted, in megabytes. 0 means no limit.
+    serve-without-database:
+      type: boolean
+      default: false
+      description: >
+        Keep serving requests made with the master key while the related
+        database is unavailable.
+    spend-logs:
+      type: boolean
+      default: true
+      description: Write a spend log entry for each request to the database.
+    litellm-settings:
+      type: string
+      default: ""
+      description: >
+        Additional LiteLLM `litellm_settings` as a YAML mapping. Named options
+        win over it. Settings the charm manages are refused.
+    router-settings:
+      type: string
+      default: ""
+      description: >
+        Additional LiteLLM `router_settings` as a YAML mapping. Named options
+        win over it. Settings the charm manages are refused.
+    extra-env:
+      type: string
+      default: ""
+      description: >
+        Additional environment variables for LiteLLM, as KEY=VALUE lines.
+        Variables the charm manages are refused. Put secrets in
+        credentials-secret instead.

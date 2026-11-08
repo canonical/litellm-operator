@@ -166,3 +166,45 @@ def test_bundled_price_map(juju: jubilant.Juju, deployed):
     source = request(service_address(juju, APP), "GET", "/model/cost_map/source", key=MASTER_KEY)
     assert source.status == 200, source.body
     assert source.json()["source"] == "local"
+
+
+def test_named_option_fallbacks(juju: jubilant.Juju, deployed, upstream: Upstream):
+    """FR-024: a request to a failing model falls back to a working one."""
+    broken = {"name": "broken", "model": "openai/none", "api-base": "http://127.0.0.1:9/v1"}
+    models = [upstream.entry("chat"), broken]
+    juju.config(APP, {"models": yaml.safe_dump(models), "fallbacks": "[{broken: [chat]}]"})
+    address = service_address(juju, APP)
+    wait_for(lambda: "broken" in model_names(address, MASTER_KEY), timeout=120, what="model")
+    assert answer(chat(address, "broken", MASTER_KEY))
+    juju.config(APP, {"models": upstream.models("chat")}, reset="fallbacks")
+
+
+def test_named_option_max_request_size(juju: jubilant.Juju, deployed):
+    """FR-024: requests over max-request-size-mb are refused."""
+    juju.config(APP, {"max-request-size-mb": 1})
+    address = service_address(juju, APP)
+    large = "x" * (2 * 1024 * 1024)
+    wait_for(
+        lambda: chat(address, "chat", MASTER_KEY, content=large).status in (400, 413),
+        timeout=120,
+        what="size limit",
+    )
+    juju.config(APP, reset="max-request-size-mb")
+
+
+def test_passthrough_setting(juju: jubilant.Juju, deployed):
+    """FR-025: a router setting without a named option reaches LiteLLM."""
+    juju.config(APP, {"router-settings": "{model_group_alias: {alias: chat}}"})
+    address = service_address(juju, APP)
+    wait_for(lambda: chat(address, "alias", MASTER_KEY).status == 200, timeout=120, what="alias")
+    juju.config(APP, reset="router-settings")
+
+
+def test_charm_owned_passthrough_blocks(juju: jubilant.Juju, deployed):
+    """FR-022, US-6: a passthrough cannot set what the charm manages."""
+    juju.config(APP, {"extra-env": "DATABASE_URL=postgresql://elsewhere/db"})
+    juju.wait(lambda status: jubilant.all_blocked(status, APP))
+    message = juju.status().apps[APP].units[f"{APP}/0"].workload_status.message
+    assert message == "extra-env must not set DATABASE_URL, the charm manages it"
+    juju.config(APP, reset="extra-env")
+    juju.wait(lambda status: jubilant.all_active(status, APP))
