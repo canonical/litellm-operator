@@ -175,3 +175,127 @@ def test_digest_follows_the_configuration():
 
 def test_credential_variable():
     assert credential_variable("my-key") == "LITELLM_CREDENTIAL_MY_KEY"
+
+
+MODEL = "[{name: m, model: openai/x}]"
+
+
+def test_named_options():
+    """FR-024: each named option lands in LiteLLM's configuration."""
+    rendered = render(
+        models=MODEL,
+        options={
+            "routing-strategy": "least-busy",
+            "num-retries": 2,
+            "request-timeout": 30,
+            "fallbacks": "[{m: [other]}]",
+            "log-level": "warning",
+            "log-request-content": True,
+            "drop-params": True,
+            "max-request-size-mb": 5,
+            "serve-without-database": True,
+            "spend-logs": False,
+        },
+    )
+    config = rendered.config
+    assert config["router_settings"] == {
+        "routing_strategy": "least-busy",
+        "fallbacks": [{"m": ["other"]}],
+    }
+    assert config["litellm_settings"] == {
+        "turn_off_message_logging": False,
+        "num_retries": 2,
+        "request_timeout": 30,
+        "drop_params": True,
+    }
+    assert config["general_settings"] == {
+        "max_request_size_mb": 5,
+        "allow_requests_on_db_unavailable": True,
+        "disable_spend_logs": True,
+        "master_key": "os.environ/LITELLM_MASTER_KEY",
+    }
+    assert rendered.environment["LITELLM_LOG"] == "WARNING"
+
+
+def test_unset_options_leave_litellm_defaults():
+    """FR-024: unset numeric options are left out, content logging is off."""
+    config = render(models=MODEL).config
+    assert config["litellm_settings"] == {"turn_off_message_logging": True}
+    assert config["router_settings"] == {"routing_strategy": "simple-shuffle"}
+    assert config["general_settings"] == {"master_key": "os.environ/LITELLM_MASTER_KEY"}
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"routing-strategy": "random"}, "routing-strategy must be one of"),
+        ({"log-level": "loud"}, "log-level must be one of"),
+        ({"num-retries": -1}, "num-retries must be 0 or more"),
+        ({"max-request-size-mb": -1}, "max-request-size-mb must be 0 or more"),
+        ({"fallbacks": "[m]"}, "fallbacks must be a list"),
+        ({"fallbacks": "[{m: other}]"}, "fallbacks must be a list"),
+    ],
+)
+def test_invalid_named_options(options, message):
+    with pytest.raises(ConfigError, match=message):
+        render(models=MODEL, options=options)
+
+
+def test_passthrough_settings_are_merged():
+    """FR-025: passthrough settings and variables reach LiteLLM."""
+    rendered = render(
+        models=MODEL,
+        litellm_settings="{set_verbose: false, max_budget: 100}",
+        router_settings="{allowed_fails: 3}",
+        extra_env="# comment\nAIOHTTP_TRUST_ENV=True\n\nOTHER = x\n",
+    )
+    assert rendered.config["litellm_settings"]["max_budget"] == 100
+    assert rendered.config["router_settings"]["allowed_fails"] == 3
+    assert rendered.environment["AIOHTTP_TRUST_ENV"] == "True"
+    assert rendered.environment["OTHER"] == "x"
+    assert rendered.conflicts == ()
+
+
+def test_named_options_win_over_passthrough():
+    """FR-025: a named option overrides the passthrough, and the conflict is reported."""
+    rendered = render(
+        models=MODEL,
+        options={"num-retries": 1},
+        litellm_settings="{num_retries: 9, turn_off_message_logging: false}",
+        router_settings="{routing_strategy: least-busy}",
+        extra_env="LITELLM_LOG=DEBUG",
+    )
+    assert rendered.config["litellm_settings"]["num_retries"] == 1
+    assert rendered.config["litellm_settings"]["turn_off_message_logging"] is True
+    assert rendered.config["router_settings"]["routing_strategy"] == "simple-shuffle"
+    assert rendered.environment["LITELLM_LOG"] == "INFO"
+    assert set(rendered.conflicts) == {
+        "litellm_settings.num_retries",
+        "litellm_settings.turn_off_message_logging",
+        "router_settings.routing_strategy",
+        "LITELLM_LOG",
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"litellm_settings": "{master_key: sk-x}"}, "litellm-settings must not set master_key"),
+        ({"litellm_settings": "{cache_params: {}}"}, "must not set cache_params"),
+        ({"router_settings": "{redis_host: h}"}, "router-settings must not set redis_host"),
+        ({"router_settings": "{num_workers: 4}"}, "must not set num_workers"),
+        ({"litellm_settings": "{store_model_in_db: true}"}, "must not set store_model_in_db"),
+        ({"extra_env": "DATABASE_URL=postgres://"}, "extra-env must not set DATABASE_URL"),
+        ({"extra_env": "LITELLM_SALT_KEY=x"}, "must not set LITELLM_SALT_KEY"),
+        ({"extra_env": "REDIS_HOST=h"}, "must not set REDIS_HOST"),
+        ({"extra_env": "PORT=8000"}, "must not set PORT"),
+        ({"extra_env": "LITELLM_MODEL_COST_MAP_URL=http://x"}, "must not set LITELLM_MODEL"),
+        ({"extra_env": "LITELLM_CREDENTIAL_X=y"}, "must not set LITELLM_CREDENTIAL_X"),
+        ({"extra_env": "not a pair"}, "extra-env line 1 must be KEY=VALUE"),
+        ({"litellm_settings": "[1]"}, "litellm-settings must be a YAML mapping"),
+    ],
+)
+def test_charm_owned_settings_are_refused(kwargs, message):
+    """FR-022: the passthrough cannot set what the charm manages."""
+    with pytest.raises(ConfigError, match=message):
+        render(models=MODEL, **kwargs)

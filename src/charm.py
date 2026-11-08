@@ -45,6 +45,20 @@ from defaults import (
 
 logger = logging.getLogger(__name__)
 
+# Named options (FR-024), passed to litellm_config by option name.
+NAMED_OPTIONS = (
+    "routing-strategy",
+    "num-retries",
+    "request-timeout",
+    "fallbacks",
+    "log-level",
+    "log-request-content",
+    "drop-params",
+    "max-request-size-mb",
+    "serve-without-database",
+    "spend-logs",
+)
+
 
 class StatusError(Exception):
     """The workload cannot run. Carries the status to report."""
@@ -132,11 +146,18 @@ class LiteLLMCharm(ops.CharmBase):
             model_cost_map_url=str(self.config.get("model-cost-map-url", "")),
             secret=self._credentials(),
             proxy=litellm_config.proxy_environment(os.environ),
+            options={name: self.config.get(name) for name in NAMED_OPTIONS},
+            litellm_settings=str(self.config.get("litellm-settings", "")),
+            router_settings=str(self.config.get("router-settings", "")),
+            extra_env=str(self.config.get("extra-env", "")),
         )
         try:
             if not litellm_config.has_models(inputs):
                 raise StatusError(ops.WaitingStatus("waiting for model configuration"))
-            return litellm_config.render(inputs)
+            rendered = litellm_config.render(inputs)
+            for setting in rendered.conflicts:
+                logger.warning("A named option overrides %s from a passthrough option", setting)
+            return rendered
         except litellm_config.ConfigError as exc:
             raise StatusError(ops.BlockedStatus(str(exc))) from exc
 
