@@ -44,7 +44,7 @@ lxc launch ubuntu:24.04 litellm-it --vm \
   -c limits.cpu=4 -c limits.memory=16GiB -d root,size=60GiB
 lxc file push -r . litellm-it/root/litellm-operator
 lxc exec litellm-it -- bash -c \
-  'snap install concierge --classic && concierge prepare -c /root/litellm-operator/.github/actions/setup-k8s/concierge.yaml'
+  'snap install concierge --classic && /snap/bin/concierge prepare -c /root/litellm-operator/.github/actions/setup-k8s/concierge.yaml'
 lxc exec litellm-it --cwd /root/litellm-operator -- env \
   JUJU_CONTROLLER=concierge-microk8s \
   uv run --group integration pytest tests/integration -v -x
@@ -52,6 +52,26 @@ lxc delete --force litellm-it   # when done
 ```
 
 Environment variables: `CHARM_PATH` (packed charm), `LITELLM_IMAGE` (OCI image override), `KEEP_MODELS=1` (keep models for debugging). [`.kb/testing.md`](.kb/testing.md) has the details.
+
+To test against a model server running on the host, give its address on the LXD bridge and a model it serves. Without these, the tests deploy a stand-in upstream:
+
+```bash
+lxc exec litellm-it --cwd /root/litellm-operator -- env \
+  JUJU_CONTROLLER=concierge-microk8s \
+  LITELLM_TEST_UPSTREAM_URL=http://$(lxc network get lxdbr0 ipv4.address | cut -d/ -f1):<port>/v1 \
+  LITELLM_TEST_UPSTREAM_MODEL=<model> \
+  uv run --group integration pytest tests/integration -v -x
+```
+
+The node-loss tests need 3 nodes. Build a cluster of 3 LXD VMs and run them from the first VM:
+
+```bash
+tests/integration/multinode/setup.sh   # prints the VM and controller names
+lxc file push -r . litellm-mn-0/root/litellm-operator   # with the packed charm
+lxc exec litellm-mn-0 --cwd /root/litellm-operator -- env \
+  JUJU_CONTROLLER=litellm-mn MULTINODE=1 \
+  uv run --group integration pytest tests/integration/test_node_loss.py -v
+```
 
 ## Publishing
 

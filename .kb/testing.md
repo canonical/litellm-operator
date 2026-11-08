@@ -39,7 +39,18 @@ uv run --group lint ruff check src tests scripts
 
 - `test_published.py`: deploys a Charmhub release instead of a packed charm. Skipped unless `CHARM_CHANNEL` is set. `EXPECTED_CHARM_REVISION` pins the revision.
 
-Environment variables: `JUJU_CONTROLLER` (required), `CHARM_PATH`, `LITELLM_IMAGE`, `KEEP_MODELS=1`.
+Environment variables: `JUJU_CONTROLLER` (required), `CHARM_PATH`, `LITELLM_IMAGE`, `KEEP_MODELS=1`, `LITELLM_TEST_UPSTREAM_URL`, `LITELLM_TEST_UPSTREAM_MODEL` and `MULTINODE=1`.
+
+## Upstreams
+
+The tests send real requests through the charm to an OpenAI-compatible upstream.
+
+- With `LITELLM_TEST_UPSTREAM_URL` (ending in `/v1`) and `LITELLM_TEST_UPSTREAM_MODEL` set, the upstream is a model server on the host of the LXD VM, reached on the host's LXD bridge address. Do not name a specific product in committed files.
+- Without them, as in CI, the tests deploy a second application of this charm named `upstream`, whose raw `model_list` entries use LiteLLM's `mock_response`. It answers streaming and non-streaming requests without network calls.
+
+## Multi-node environment
+
+Node-loss tests need a Kubernetes cluster of 3 nodes, which concierge cannot build. `tests/integration/multinode/setup.sh` launches 3 LXD VMs, joins them into one MicroK8s cluster and bootstraps a controller on it. `test_node_loss.py` runs only with `MULTINODE=1` and a `JUJU_CONTROLLER` on that cluster, and loses a node by taking the network of one VM down for a few minutes over SSH, so the test needs no access to the host's LXD or Juju client. CI does not run it.
 
 ## Local controller
 

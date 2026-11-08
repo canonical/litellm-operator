@@ -3,6 +3,7 @@
 IMPORTANT: Read the `.kb/agents.md` file.
 
 - [.kb/agents.md](.kb/agents.md) - Structure and rules of the knowledge base. You MUST read this file.
+- [.kb/architecture.md](.kb/architecture.md) - What the charm deploys, the reconcile, and which module does what.
 - [.kb/testing.md](.kb/testing.md) - Unit and integration tests, and the controllers integration tests may use.
 - [.kb/releases.md](.kb/releases.md) - How CI builds, publishes and verifies the charm on Charmhub.
 - [.kb/spec-kit.md](.kb/spec-kit.md) - Spec Kit workflow, its generated files, and how a feature is delivered.
@@ -14,5 +15,3 @@ IMPORTANT: Read the `.kb/agents.md` file.
 # Project
 
 The LiteLLM Operator is a Kubernetes charm for the [LiteLLM](https://github.com/BerriAI/litellm) proxy, an OpenAI-compatible gateway to many LLM providers. `README.md` is the operator documentation and `CONTRIBUTING.md` is the human contributor guide. The knowledge base above is the agent's guide, and `requirements/` holds the behavior each feature commits to.
-
-The charm has no implementation yet. The first feature's base pull request adds `.kb/architecture.md`.
