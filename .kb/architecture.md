@@ -67,6 +67,7 @@ These facts were checked against LiteLLM v1.108.3.
 - LiteLLM does not watch its configuration file. A change needs a restart.
 - With a database, startup runs `prisma migrate deploy`. The Prisma engines are in the image and `PRISMA_OFFLINE_MODE` is set, so nothing is downloaded.
 - `LITELLM_LOCAL_MODEL_COST_MAP=True` forces the bundled price map and ignores any URL. The charm sets it unless `model-cost-map-url` is set, in which case it sets `LITELLM_MODEL_COST_MAP_URL` instead. `GET /model/cost_map/source`, with the master key, reports `fallback_reason` when the configured map was not used.
+- `DISABLE_ADMIN_UI=True` turns off the admin UI, which is a separate feature.
 - `litellm_settings.turn_off_message_logging` redacts content sent to logging callbacks. A request can override it with the `litellm-disable-message-redaction` header. `LITELLM_LOG` defaults to `DEBUG`, so the charm always sets it.
 
 ## Configuration and secrets

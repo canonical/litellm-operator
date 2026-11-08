@@ -44,7 +44,7 @@ lxc launch ubuntu:24.04 litellm-it --vm \
   -c limits.cpu=4 -c limits.memory=16GiB -d root,size=60GiB
 lxc file push -r . litellm-it/root/litellm-operator
 lxc exec litellm-it -- bash -c \
-  'snap install concierge --classic && concierge prepare -c /root/litellm-operator/.github/actions/setup-k8s/concierge.yaml'
+  'snap install concierge --classic && /snap/bin/concierge prepare -c /root/litellm-operator/.github/actions/setup-k8s/concierge.yaml'
 lxc exec litellm-it --cwd /root/litellm-operator -- env \
   JUJU_CONTROLLER=concierge-microk8s \
   uv run --group integration pytest tests/integration -v -x
