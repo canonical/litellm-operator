@@ -87,7 +87,6 @@ Spend is calculated from the price map bundled in the image. Set prices on a mod
 | `log-level` | `INFO` | Workload log level. |
 | `log-request-content` | `false` | Whether prompts and completions may be logged. |
 | `drop-params` | `false` | Drop request parameters an upstream does not support. |
-| `max-request-size-mb` | `0` | Largest request accepted, 0 for no limit. |
 | `serve-without-database` | `false` | Keep serving master key requests while the database is down. |
 | `spend-logs` | `true` | Write a spend log entry per request. |
 | `model-cost-map-url` | | Address of a full price map to use instead of the bundled one. |

@@ -176,3 +176,35 @@ def test_proxy_change_on_update_status(ctx, monkeypatch):
     out = ctx.run(ctx.on.update_status(), _state(_running()))
     service = out.get_container(CONTAINER).plan.services[SERVICE]
     assert service.environment["HTTPS_PROXY"] == "http://squid:3128"
+
+
+def test_named_options_reach_the_file(ctx):
+    """FR-024: named options are rendered into the pushed configuration."""
+    out = ctx.run(
+        ctx.on.config_changed(),
+        _state(_container(), config={"routing-strategy": "least-busy", "num-retries": 3}),
+    )
+    container = out.get_container(CONTAINER)
+    text = (container.get_filesystem(ctx) / CONFIG_PATH.lstrip("/")).read_text()
+    assert "routing_strategy: least-busy" in text
+    assert "num_retries: 3" in text
+
+
+def test_charm_owned_passthrough_blocks(ctx):
+    """FR-022: a charm-owned key in the passthrough blocks, naming it."""
+    out = ctx.run(
+        ctx.on.config_changed(),
+        _state(_container(), config={"extra-env": "DATABASE_URL=postgres://x"}),
+    )
+    assert out.unit_status == BlockedStatus(
+        "extra-env must not set DATABASE_URL, the charm manages it"
+    )
+
+
+def test_conflicts_are_logged(ctx, caplog):
+    """A passthrough setting that a named option overrides is logged."""
+    ctx.run(
+        ctx.on.config_changed(),
+        _state(_container(), config={"router-settings": "{routing_strategy: least-busy}"}),
+    )
+    assert "overrides router_settings.routing_strategy" in caplog.text

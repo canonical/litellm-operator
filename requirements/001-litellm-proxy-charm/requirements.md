@@ -59,7 +59,6 @@ Applications that call several model servers each need the addresses, credential
   - the log level
   - whether request and response content is logged, off by default
   - dropping parameters an upstream does not support
-  - the maximum request size
   - whether requests with the master key are served while the database is unavailable
   - whether spend logs are written
 - **FR-025**: THE SYSTEM SHALL accept raw LiteLLM `litellm_settings`, `router_settings` and environment variables through passthrough options, with named options taking precedence.
