@@ -107,7 +107,7 @@ Applications that call several model servers each need the addresses, credential
 - An unreachable database is reported in status, and requests with the master key keep succeeding.
 - A configured price map that is unreachable, not in LiteLLM's format, or much smaller than the bundled map is not used, and the unit status says so.
 - Removing the store relation while more than one unit runs blocks the units as if no store had been related.
-- A new pod joins the Service before the charm can check its workload, so requests that reach it fail until the charm takes it out again, about 10 seconds after it starts. Pod deletion, scaling up and refresh start new pods.
+- A new pod joins the Service before the charm can check its workload, so requests that reach it fail until the charm takes it out again, about 10 seconds after it starts. Pod deletion, scaling up and refresh start new pods. When a new unit's start hook runs more than about 30 seconds after its pod starts, the unit can be active for up to about 10 seconds before Kubernetes routes requests to it.
 
 ## Assumptions
 

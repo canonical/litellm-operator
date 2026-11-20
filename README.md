@@ -60,7 +60,7 @@ juju deploy litellm --channel edge -n 3 --config credentials-secret=<secret URI>
 juju integrate litellm valkey
 ```
 
-The constraint keeps any two units off the same node, so with more units than nodes the extra units stay pending. Configuration changes restart one unit at a time, and each unit leaves the Service before it restarts. When Kubernetes starts a new pod, for a replaced pod, scaling up or a refresh, some requests that reach the new pod fail for about 10 seconds, until the charm takes it out of the Service while LiteLLM starts. Clients that retry refused connections do not notice.
+The constraint keeps any two units off the same node, so with more units than nodes the extra units stay pending. Configuration changes restart one unit at a time, and each unit leaves the Service before it restarts. When Kubernetes starts a new pod, for a replaced pod, scaling up or a refresh, some requests that reach the new pod fail for about 10 seconds, until the charm takes it out of the Service while LiteLLM starts. A new unit can also be active for up to about 10 seconds before Kubernetes routes requests to it. Clients that retry refused connections do not notice.
 
 ### Virtual keys and spend
 

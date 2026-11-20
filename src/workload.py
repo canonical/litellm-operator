@@ -12,17 +12,46 @@ import ops
 from defaults import (
     ALIVE_CHECK,
     CONFIG_PATH,
+    DRAIN_CHECK,
+    DRAIN_FILE,
     ENTRYPOINT,
     LIVENESS_PATH,
     PORT,
     READINESS_PATH,
     READY_CHECK,
     SERVICE,
+    STOP_DELAY_SECONDS,
     WORKING_DIR,
     WORKLOAD_UID,
 )
 
 DIGEST_VARIABLE = "LITELLM_CHARM_CONFIG_DIGEST"
+
+# Pebble stops a service by signalling its process group. LiteLLM runs in its
+# own session, and gets the signal STOP_DELAY_SECONDS after the shell does.
+STOP_WRAPPER = (
+    "/bin/sh -c '"
+    'setsid "$0" "$@" & child=$!; '
+    f'trap "sleep {STOP_DELAY_SECONDS}; kill -TERM $child" TERM; '
+    "wait $child; while kill -0 $child 2>/dev/null; do wait $child; done'"
+)
+
+
+def _drain_check() -> ops.pebble.CheckDict:
+    return {
+        "override": "replace",
+        "level": "ready",
+        "period": "1s",
+        "timeout": "1s",
+        "threshold": 1,
+        "exec": {"command": f"/bin/sh -c 'test ! -e {DRAIN_FILE}'"},
+    }
+
+
+def drain_layer() -> ops.pebble.LayerDict:
+    """Only the drain check: added as early as possible, so that a new pod is not
+    ready before LiteLLM runs. Pebble counts a container without checks as ready."""
+    return {"summary": "LiteLLM drain check", "checks": {DRAIN_CHECK: _drain_check()}}
 
 
 def build_layer(environment: Mapping[str, str], config_digest: str) -> ops.pebble.LayerDict:
@@ -32,7 +61,7 @@ def build_layer(environment: Mapping[str, str], config_digest: str) -> ops.pebbl
     configuration file changes the service and the replan restarts it:
     LiteLLM does not watch its configuration file.
     """
-    command = f"{ENTRYPOINT} --config {CONFIG_PATH} --port {PORT} --num_workers 1"
+    command = f"{STOP_WRAPPER} {ENTRYPOINT} --config {CONFIG_PATH} --port {PORT} --num_workers 1"
     return {
         "summary": "LiteLLM proxy",
         "services": {
@@ -45,17 +74,23 @@ def build_layer(environment: Mapping[str, str], config_digest: str) -> ops.pebbl
                 "working-dir": WORKING_DIR,
                 "environment": {**environment, DIGEST_VARIABLE: config_digest},
                 "on-check-failure": {ALIVE_CHECK: "restart"},
+                # Longer than STOP_DELAY_SECONDS and LiteLLM's own shutdown.
+                "kill-delay": "15s",
             }
         },
         "checks": {
+            # Juju's readiness probe asks Pebble every 5 seconds, and Pebble
+            # counts a new check as up until it fails `threshold` times. Short
+            # periods keep a unit that is not serving out of the Service.
             READY_CHECK: {
                 "override": "replace",
                 "level": "ready",
-                "period": "10s",
-                "timeout": "5s",
-                "threshold": 3,
+                "period": "2s",
+                "timeout": "2s",
+                "threshold": 2,
                 "http": {"url": f"http://localhost:{PORT}{READINESS_PATH}"},
             },
+            DRAIN_CHECK: _drain_check(),
             ALIVE_CHECK: {
                 "override": "replace",
                 "level": "alive",
