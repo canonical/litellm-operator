@@ -5,7 +5,12 @@ requires-python = ">=3.12"
 description = "Kubernetes charm for the LiteLLM proxy"
 license = "Apache-2.0"
 authors = [{ name = "Canonical Ltd." }]
-dependencies = []
+dependencies = [
+    "ops ~= 3.0",
+    "pyyaml",
+    # Required by the vendored charms.traefik_k8s.v2.ingress library.
+    "pydantic ~= 2.0",
+]
 
 [dependency-groups]
 lint = [
@@ -13,6 +18,7 @@ lint = [
 ]
 unit = [
     "pytest",
+    "ops[testing] ~= 3.0",
 ]
 integration = [
     "pytest",
@@ -31,7 +37,13 @@ select = ["E", "W", "F", "I", "N", "UP", "B"]
 [tool.ruff.lint.isort]
 known-first-party = [
     "adopt_requirements",
+    "charm",
     "check_requirements",
+    "conftest",
+    "defaults",
+    "helpers",
+    "litellm_config",
+    "workload",
 ]
 
 [tool.pytest.ini_options]
